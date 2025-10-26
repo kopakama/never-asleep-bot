@@ -81,7 +81,7 @@ async def schedule_alarm(app: Application, user_id: int, alarm_time: datetime, m
 
 # Функция отправки спам-сообщений
 async def spam_messages(app: Application, user_id: int, alarm_time: datetime, message: str):
-    """Отправляет спам-сообщения каждые 5 секунд пока флаг активен"""
+    """Отправляет спам-сообщения каждые 2 секунды пока флаг активен"""
     spam_active[user_id] = True
     
     while spam_active.get(user_id, False):
@@ -95,8 +95,8 @@ async def spam_messages(app: Application, user_id: int, alarm_time: datetime, me
             await app.bot.send_message(chat_id=user_id, text=alarm_text)
             logger.info(f"Будильник отправлен пользователю {user_id}")
             
-            # Ждем 5 секунд перед следующим сообщением
-            await asyncio.sleep(5)
+            # Ждем 2 секунды перед следующим сообщением
+            await asyncio.sleep(2)
             
         except asyncio.CancelledError:
             logger.info(f"Спам отменен для пользователя {user_id}")
@@ -326,7 +326,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/set 08:30 Доброе утро!`\n"
             "• `/set 14:00 Обеденный перерыв`\n"
             "• `/set 22:00 Время спать`\n\n"
-            "💡 После установки бот будет звонить каждые 5 секунд",
+            "💡 После установки бот будет звонить каждые 2 секунды",
             parse_mode="Markdown"
         )
     elif query.data == "status":
