@@ -4,8 +4,8 @@ import os
 import sqlite3
 from datetime import datetime
 from typing import Dict, List
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения из .env файла
@@ -134,13 +134,24 @@ async def send_alarm(app: Application, user_id: int, alarm_time: datetime, messa
 # Обработчик команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Приветственное сообщение"""
+    keyboard = [
+        [InlineKeyboardButton("⏰ Установить будильник", callback_data="set_alarm")],
+        [InlineKeyboardButton("📊 Мои будильники", callback_data="status")],
+        [InlineKeyboardButton("🛑 Остановить все", callback_data="stop")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(
-        "👋 Привет! Я бот-будильник.\n\n"
-        "📝 Команды:\n"
-        "• /set HH:MM [сообщение] - установить будильник на время\n"
-        "• /stop - остановить все будильники\n"
-        "• /status - показать активные будильники\n\n"
-        "Пример: /set 08:30 Доброе утро!"
+        "👋 Привет! Я **Будильник** 📢\n\n"
+        "🎯 **Как это работает:**\n"
+        "1. Установите время будильника\n"
+        "2. Бот будет звонить каждые 5 секунд\n"
+        "3. Напишите 'стоп' чтобы остановить\n\n"
+        "📌 **Пример:**\n"
+        "`/set 08:30 Доброе утро!`\n\n"
+        "Или используйте кнопки ниже 👇",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
 
 # Обработчик команды /set
@@ -206,11 +217,21 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if minutes > 0:
             time_text += f"{minutes} минут(ы) "
         
+        keyboard = [
+            [InlineKeyboardButton("📊 Мои будильники", callback_data="status")],
+            [InlineKeyboardButton("🛑 Остановить", callback_data="stop")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
-            f"✅ Будильник установлен на {alarm_time.strftime('%H:%M')}\n"
-            f"⏳ До будильника: {time_text.strip() or 'менее минуты'}\n"
-            f"📢 Бот будет отправлять сообщения каждые 5 секунд пока вы не напишете 'стоп'\n"
-            f"❌ Чтобы остановить, напишите 'стоп' или используйте /stop"
+            f"✅ **Будильник установлен!**\n\n"
+            f"⏰ **Время:** `{alarm_time.strftime('%H:%M')}`\n"
+            f"⏳ **До будильника:** {time_text.strip() or 'менее минуты'}\n\n"
+            f"📢 Бот будет отправлять сообщения каждые 5 секунд\n"
+            f"❌ Для остановки: напишите 'стоп' или `/stop`\n\n"
+            f"💡 *Или используйте кнопки ниже*",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
         
     except ValueError:
@@ -244,7 +265,18 @@ async def stop_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     active_alarms[user_id] = []
     
-    await update.message.reply_text("🛑 Все будильники остановлены!")
+    keyboard = [
+        [InlineKeyboardButton("⏰ Установить новый", callback_data="set_alarm")],
+        [InlineKeyboardButton("📊 Статус", callback_data="status")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🛑 **Все будильники остановлены!**\n\n"
+        "Для установки нового будильника используйте `/set HH:MM`",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
 
 # Обработчик команды /status
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,6 +311,85 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["стоп", "stop", "остановить", "stop all"]:
         await stop_alarm(update, context)
 
+# Обработчик кнопок (callback query)
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает нажатия на inline-кнопки"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "set_alarm":
+        await query.edit_message_text(
+            "⏰ **Установить будильник**\n\n"
+            "📝 **Формат:**\n"
+            "`/set HH:MM [сообщение]`\n\n"
+            "**Примеры:**\n"
+            "• `/set 08:30 Доброе утро!`\n"
+            "• `/set 14:00 Обеденный перерыв`\n"
+            "• `/set 22:00 Время спать`\n\n"
+            "💡 После установки бот будет звонить каждые 5 секунд",
+            parse_mode="Markdown"
+        )
+    elif query.data == "status":
+        user_id = update.effective_user.id
+        
+        # Проверяем БД
+        conn = sqlite3.connect('alarms.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT alarm_time, message FROM alarms WHERE user_id = ?', (user_id,))
+        alarms = cursor.fetchall()
+        conn.close()
+        
+        if not alarms:
+            await query.edit_message_text(
+                "📭 **Нет активных будильников**\n\n"
+                "Используйте `/set HH:MM` для установки будильника",
+                parse_mode="Markdown"
+            )
+        else:
+            status_text = "📊 **Ваши активные будильники:**\n\n"
+            for alarm_time, message in alarms:
+                status_text += f"⏰ `{alarm_time}`"
+                if message:
+                    status_text += f" — *{message}*"
+                status_text += "\n"
+            
+            await query.edit_message_text(
+                status_text,
+                parse_mode="Markdown"
+            )
+    elif query.data == "stop":
+        user_id = update.effective_user.id
+        
+        if user_id not in active_alarms or not active_alarms[user_id]:
+            await query.edit_message_text(
+                "⏸ **Нет активных будильников**\n\n"
+                "Используйте `/set HH:MM` для установки",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Останавливаем спам
+        spam_active[user_id] = False
+        
+        # Отменяем все задачи
+        for task in active_alarms[user_id]:
+            task.cancel()
+        
+        # Удаляем из БД
+        conn = sqlite3.connect('alarms.db')
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM alarms WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        
+        active_alarms[user_id] = []
+        
+        await query.edit_message_text(
+            "🛑 **Все будильники остановлены!**\n\n"
+            "Для установки нового будильника отправьте `/set HH:MM`",
+            parse_mode="Markdown"
+        )
+
 def main():
     """Основная функция запуска бота"""
     # Инициализация БД
@@ -303,6 +414,9 @@ def main():
     application.add_handler(CommandHandler("stop", stop_alarm))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    # Обработчик для inline-кнопок
+    application.add_handler(CallbackQueryHandler(button_handler))
     
     # Запускаем бота
     logger.info("Бот запущен...")

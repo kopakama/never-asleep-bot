@@ -1,0 +1,61 @@
+===============================================
+  КАК ЗАГРУЗИТЬ ФАЙЛЫ НА СЕРВЕР
+===============================================
+
+ВАРИАНТ 1: Через SCP (из Windows)
+
+1. Откройте PowerShell в папке проекта:
+   cd E:\work\git\tg-alarm
+
+2. Загрузите файлы на сервер:
+   scp bot.py requirements.txt deploy_simple.sh user@SERVER-IP:~/telegram-bot/
+
+3. Создайте .env на сервере:
+   scp .env user@SERVER-IP:~/telegram-bot/
+
+4. Подключитесь к серверу:
+   ssh user@SERVER-IP
+
+5. На сервере:
+   cd ~/telegram-bot
+   chmod +x deploy_simple.sh
+   ./deploy_simple.sh
+
+===============================================
+ВАРИАНТ 2: Все файлы одной командой
+
+В PowerShell (на вашем компьютере):
+```powershell
+scp bot.py requirements.txt deploy_simple.sh Dockerfile docker-compose.yml telegram-bot.service user@SERVER-IP:~/telegram-bot/
+scp .env user@SERVER-IP:~/telegram-bot/.env
+```
+
+===============================================
+ВАРИАНТ 3: Минимальный набор
+
+Загрузите только самое необходимое:
+```powershell
+scp bot.py requirements.txt deploy_simple.sh user@SERVER-IP:~/telegram-bot/
+```
+
+Потом создайте .env прямо на сервере:
+```bash
+ssh user@SERVER-IP
+cd ~/telegram-bot
+nano .env
+# Добавьте: TELEGRAM_BOT_TOKEN=ваш_токен
+# Сохраните: Ctrl+O, Enter, Ctrl+X
+chmod +x deploy_simple.sh
+./deploy_simple.sh
+```
+
+===============================================
+ВАРИАНТ 4: Через SFTP (FileZilla, WinSCP)
+
+1. Откройте FileZilla или WinSCP
+2. Подключитесь к серверу
+3. Перетащите файлы в ~/telegram-bot
+4. Запустите deploy_simple.sh
+
+===============================================
+

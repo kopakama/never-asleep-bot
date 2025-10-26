@@ -21,6 +21,13 @@ if [ ! -f .env ]; then
     echo "✅ Файл .env создан"
 fi
 
+# Проверяем наличие модуля venv
+if ! python3 -m venv --help &> /dev/null; then
+    echo "Устанавливаем python3-venv..."
+    sudo apt-get update
+    sudo apt-get install -y python3-venv
+fi
+
 # Проверяем наличие виртуального окружения
 if [ ! -d "venv" ]; then
     echo "Создаем виртуальное окружение..."
@@ -30,7 +37,15 @@ fi
 
 # Активируем виртуальное окружение
 echo "Активируем виртуальное окружение..."
-source venv/bin/activate
+if [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
+else
+    echo "ОШИБКА: Не найден venv/bin/activate"
+    echo "Пробуем пересоздать виртуальное окружение..."
+    rm -rf venv
+    python3 -m venv venv
+    source venv/bin/activate
+fi
 
 # Устанавливаем зависимости
 echo "Устанавливаем зависимости..."
