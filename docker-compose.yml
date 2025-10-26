@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  telegram-bot:
+    build: .
+    container_name: telegram-alarm-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      # Сохраняем базу данных
+      - ./alarms.db:/app/alarms.db
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - bot-network
+
+networks:
+  bot-network:
+    driver: bridge
+
