@@ -76,7 +76,8 @@ async def schedule_alarm(app: Application, user_id: int, alarm_time: datetime, m
         repeat_days: Множество дней недели (0=понедельник, 6=воскресенье) для повторяющихся будильников
     """
     now = datetime.now()
-    target = alarm_time.replace(year=now.year, month=now.month, day=now.day)
+    # Создаем datetime с текущей датой и указанным временем из alarm_time
+    target = now.replace(hour=alarm_time.hour, minute=alarm_time.minute, second=0, microsecond=0)
     
     # Если время прошло и это не повторяющийся будильник
     if target < now:
@@ -219,8 +220,21 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Парсим время
-        time_str = context.args[0]
-        alarm_time = datetime.strptime(time_str, "%H:%M")
+        time_str = context.args[0].strip()
+        
+        # Проверяем и парсим формат времени
+        alarm_time = None
+        formats_to_try = ["%H:%M", "%H.%M", "%H %M"]
+        
+        for fmt in formats_to_try:
+            try:
+                alarm_time = datetime.strptime(time_str, fmt)
+                break
+            except ValueError:
+                continue
+        
+        if alarm_time is None:
+            raise ValueError(f"Неверный формат времени: {time_str}. Используйте HH:MM (например, 08:30 или 8:30)")
         
         # Получаем сообщение, если есть
         message = " ".join(context.args[1:]) if len(context.args) > 1 else ""
@@ -252,7 +266,8 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Вычисляем время до будильника
         now = datetime.now()
-        target = alarm_time.replace(year=now.year, month=now.month, day=now.day)
+        # Создаем datetime с текущей датой и указанным временем
+        target = now.replace(hour=alarm_time.hour, minute=alarm_time.minute, second=0, microsecond=0)
         
         if target < now:
             target = target + timedelta(days=1)
@@ -286,11 +301,31 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Неверный формат времени. Используйте: /set HH:MM [сообщение]\n"
-            "Пример: /set 08:30"
-        )
+    except ValueError as e:
+        error_msg = str(e)
+        if "формат времени" in error_msg.lower() or "hh:mm" in error_msg.lower():
+            await update.message.reply_text(
+                "❌ **Неверный формат времени!**\n\n"
+                "📝 **Правильный формат:** `HH:MM`\n\n"
+                "**Примеры правильного формата:**\n"
+                "• `/set 08:30` ✅\n"
+                "• `/set 8:30` ✅ (можно без ведущего нуля)\n"
+                "• `/set 23:59` ✅\n"
+                "• `/set 00:00` ✅\n\n"
+                "❌ **Неправильно:**\n"
+                "• `/set 8-30` ❌ (дефис вместо двоеточия)\n"
+                "• `/set 830` ❌ (без разделителя)\n"
+                "• `/set 8 30` ❌ (пробел вместо двоеточия)\n"
+                "• `/set 25:00` ❌ (час больше 23)",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Ошибка: {error_msg}\n\n"
+                "Используйте: `/set HH:MM [сообщение]`\n"
+                "Пример: `/set 08:30`",
+                parse_mode="Markdown"
+            )
 
 # Обработчик команды /repeat
 async def set_repeat_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -314,8 +349,21 @@ async def set_repeat_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Парсим время
-        time_str = context.args[0]
-        alarm_time = datetime.strptime(time_str, "%H:%M")
+        time_str = context.args[0].strip()
+        
+        # Проверяем и парсим формат времени
+        alarm_time = None
+        formats_to_try = ["%H:%M", "%H.%M", "%H %M"]
+        
+        for fmt in formats_to_try:
+            try:
+                alarm_time = datetime.strptime(time_str, fmt)
+                break
+            except ValueError:
+                continue
+        
+        if alarm_time is None:
+            raise ValueError(f"Неверный формат времени: {time_str}. Используйте HH:MM (например, 08:30 или 8:30)")
         
         # Парсим дни недели
         days_str = context.args[1]
@@ -355,7 +403,8 @@ async def set_repeat_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Вычисляем время до будильника
         now = datetime.now()
-        target = alarm_time.replace(year=now.year, month=now.month, day=now.day)
+        # Создаем datetime с текущей датой и указанным временем
+        target = now.replace(hour=alarm_time.hour, minute=alarm_time.minute, second=0, microsecond=0)
         target = find_next_repeat_day(target, repeat_days_set, now)
         
         time_until = target - now
@@ -390,14 +439,24 @@ async def set_repeat_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except ValueError as e:
         error_msg = str(e)
-        if "time" in error_msg.lower() or "формат" in error_msg.lower():
+        if "формат времени" in error_msg.lower() or "hh:mm" in error_msg.lower():
             await update.message.reply_text(
-                "❌ Неверный формат времени. Используйте: /repeat HH:MM дни [сообщение]\n"
-                "Пример: /repeat 08:30 12345 Работа"
+                "❌ **Неверный формат времени!**\n\n"
+                "📝 **Правильный формат:** `HH:MM`\n\n"
+                "**Примеры правильного формата:**\n"
+                "• `/repeat 08:30 12345` ✅\n"
+                "• `/repeat 8:30 12345` ✅ (можно без ведущего нуля)\n"
+                "• `/repeat 23:59 67` ✅\n\n"
+                "❌ **Неправильно:**\n"
+                "• `/repeat 8-30 12345` ❌ (дефис вместо двоеточия)\n"
+                "• `/repeat 830 12345` ❌ (без разделителя)\n"
+                "• `/repeat 25:00 12345` ❌ (час больше 23)",
+                parse_mode="Markdown"
             )
-        else:
+        elif "дней недели" in error_msg.lower():
             await update.message.reply_text(
-                "❌ Неверный формат дней. Используйте числа от 1 до 7:\n"
+                "❌ **Неверный формат дней!**\n\n"
+                "Используйте числа от **1** до **7**:\n"
                 "• 1 = Понедельник\n"
                 "• 2 = Вторник\n"
                 "• 3 = Среда\n"
@@ -405,7 +464,18 @@ async def set_repeat_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• 5 = Пятница\n"
                 "• 6 = Суббота\n"
                 "• 7 = Воскресенье\n\n"
-                "Пример: `/repeat 08:30 12345` - будни"
+                "**Примеры:**\n"
+                "• `/repeat 08:30 12345` - будни (Пн-Пт)\n"
+                "• `/repeat 09:00 1234567` - каждый день\n"
+                "• `/repeat 12:00 67` - выходные",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Ошибка: {error_msg}\n\n"
+                "Используйте: `/repeat HH:MM дни [сообщение]`\n"
+                "Пример: `/repeat 08:30 12345 Работа`",
+                parse_mode="Markdown"
             )
 
 # Обработчик команды /stop
