@@ -2,8 +2,9 @@ import asyncio
 import logging
 import os
 import sqlite3
-from datetime import datetime
-from typing import Dict, List
+import json
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from dotenv import load_dotenv
@@ -34,9 +35,15 @@ def init_db():
             user_id INTEGER NOT NULL,
             alarm_time TEXT NOT NULL,
             message TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            repeat_days TEXT
         )
     ''')
+    # Добавляем колонку repeat_days если её нет (для существующих БД)
+    try:
+        cursor.execute('ALTER TABLE alarms ADD COLUMN repeat_days TEXT')
+    except sqlite3.OperationalError:
+        pass  # Колонка уже существует
     conn.commit()
     conn.close()
     logger.info("База данных инициализирована")
@@ -45,39 +52,73 @@ def init_db():
 async def load_saved_alarms(app: Application):
     conn = sqlite3.connect('alarms.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT user_id, alarm_time, message FROM alarms')
+    cursor.execute('SELECT user_id, alarm_time, message, repeat_days FROM alarms')
     alarms = cursor.fetchall()
     conn.close()
     
-    for user_id, alarm_time, message in alarms:
+    for user_id, alarm_time, message, repeat_days in alarms:
         try:
             alarm_datetime = datetime.strptime(alarm_time, "%H:%M")
-            await schedule_alarm(app, user_id, alarm_datetime, message or "")
+            repeat_days_set = set(json.loads(repeat_days)) if repeat_days else None
+            await schedule_alarm(app, user_id, alarm_datetime, message or "", repeat_days_set)
         except Exception as e:
             logger.error(f"Ошибка при загрузке будильника: {e}")
 
 # Функция планирования будильника
-async def schedule_alarm(app: Application, user_id: int, alarm_time: datetime, message: str = ""):
-    """Планирует будильник на указанное время"""
+async def schedule_alarm(app: Application, user_id: int, alarm_time: datetime, message: str = "", repeat_days: Optional[Set[int]] = None):
+    """Планирует будильник на указанное время
+    
+    Args:
+        app: Приложение бота
+        user_id: ID пользователя
+        alarm_time: Время будильника (только час и минута)
+        message: Сообщение для будильника
+        repeat_days: Множество дней недели (0=понедельник, 6=воскресенье) для повторяющихся будильников
+    """
     now = datetime.now()
     target = alarm_time.replace(year=now.year, month=now.month, day=now.day)
     
-    # Если время прошло, планируем на завтра
+    # Если время прошло и это не повторяющийся будильник
     if target < now:
-        target = target.replace(day=target.day + 1)
+        if repeat_days:
+            # Для повторяющегося будильника находим следующий подходящий день
+            target = find_next_repeat_day(target, repeat_days, now)
+        else:
+            # Для одноразового будильника планируем на завтра
+            target = target + timedelta(days=1)
+    
+    # Если это повторяющийся будильник и сегодня подходящий день не найден
+    if repeat_days and target.weekday() not in repeat_days:
+        target = find_next_repeat_day(target, repeat_days, now)
     
     delay = (target - now).total_seconds()
-    logger.info(f"Будильник запланирован для пользователя {user_id} на {alarm_time.strftime('%H:%M')}")
+    logger.info(f"Будильник запланирован для пользователя {user_id} на {target.strftime('%Y-%m-%d %H:%M')} (повтор: {repeat_days is not None})")
     
     # Создаем задачу
     task = asyncio.create_task(
-        send_alarm(app, user_id, alarm_time, message, delay)
+        send_alarm(app, user_id, alarm_time, message, delay, repeat_days)
     )
     
     # Сохраняем задачу
     if user_id not in active_alarms:
         active_alarms[user_id] = []
     active_alarms[user_id].append(task)
+
+# Функция поиска следующего дня для повторяющегося будильника
+def find_next_repeat_day(target: datetime, repeat_days: Set[int], now: datetime) -> datetime:
+    """Находит следующий подходящий день для повторяющегося будильника"""
+    # Проверяем дни начиная с сегодня до конца следующей недели
+    for days_ahead in range(14):
+        candidate = target + timedelta(days=days_ahead)
+        # Если время в прошлом, пропускаем
+        if candidate < now:
+            continue
+        # Проверяем, подходит ли день недели
+        if candidate.weekday() in repeat_days:
+            return candidate
+    
+    # Если ничего не найдено (не должно произойти), возвращаем следующий день
+    return now + timedelta(days=1)
 
 # Функция отправки спам-сообщений
 async def spam_messages(app: Application, user_id: int, alarm_time: datetime, message: str):
@@ -106,7 +147,7 @@ async def spam_messages(app: Application, user_id: int, alarm_time: datetime, me
             break
 
 # Функция отправки будильника
-async def send_alarm(app: Application, user_id: int, alarm_time: datetime, message: str, delay: float):
+async def send_alarm(app: Application, user_id: int, alarm_time: datetime, message: str, delay: float, repeat_days: Optional[Set[int]] = None):
     """Ждет указанное время и запускает спам"""
     try:
         # Ждем до наступления времени будильника
@@ -124,6 +165,10 @@ async def send_alarm(app: Application, user_id: int, alarm_time: datetime, messa
         if user_id not in active_alarms:
             active_alarms[user_id] = []
         active_alarms[user_id].append(task)
+        
+        # Если это повторяющийся будильник, планируем следующий раз
+        if repeat_days:
+            await schedule_alarm(app, user_id, alarm_time, message, repeat_days)
         
     except asyncio.CancelledError:
         logger.info(f"Будильник отменен для пользователя {user_id}")
@@ -147,8 +192,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Установите время будильника\n"
         "2. Бот будет звонить каждые 2 секунды\n"
         "3. Напишите 'стоп' чтобы остановить\n\n"
-        "📌 **Пример:**\n"
-        "`/set 08:30 Доброе утро!`\n\n"
+        "📌 **Команды:**\n"
+        "• `/set HH:MM [сообщение]` - одноразовый будильник\n"
+        "• `/repeat HH:MM дни [сообщение]` - повторяющийся\n\n"
+        "📌 **Примеры:**\n"
+        "• `/set 08:30 Доброе утро!`\n"
+        "• `/repeat 09:00 12345 Работа` - будни\n"
+        "• `/repeat 12:00 67 Выходные`\n\n"
         "Или используйте кнопки ниже 👇",
         reply_markup=reply_markup,
         parse_mode="Markdown"
@@ -156,11 +206,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработчик команды /set
 async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Устанавливает будильник"""
+    """Устанавливает одноразовый будильник"""
     if not context.args:
         await update.message.reply_text(
             "❌ Неверный формат. Используйте: /set HH:MM [сообщение]\n"
-            "Пример: /set 08:30 Проснись!"
+            "Пример: /set 08:30 Проснись!\n\n"
+            "💡 Для повторяющегося будильника используйте `/repeat`"
         )
         return
     
@@ -183,18 +234,18 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Отменяем флаг спама если был установлен
         spam_active[user_id] = False
         
-        # Планируем новый будильник
-        await schedule_alarm(context.application, user_id, alarm_time, message)
+        # Планируем новый будильник (одноразовый, без repeat_days)
+        await schedule_alarm(context.application, user_id, alarm_time, message, None)
         
         # Сохраняем в БД
         conn = sqlite3.connect('alarms.db')
         cursor = conn.cursor()
-        # Удаляем старые будильники пользователя
-        cursor.execute('DELETE FROM alarms WHERE user_id = ?', (user_id,))
+        # Удаляем старые будильники пользователя (только одноразовые)
+        cursor.execute('DELETE FROM alarms WHERE user_id = ? AND (repeat_days IS NULL OR repeat_days = "")', (user_id,))
         # Добавляем новый
         cursor.execute(
-            'INSERT INTO alarms (user_id, alarm_time, message, created_at) VALUES (?, ?, ?, ?)',
-            (user_id, alarm_time.strftime("%H:%M"), message, datetime.now().isoformat())
+            'INSERT INTO alarms (user_id, alarm_time, message, created_at, repeat_days) VALUES (?, ?, ?, ?, ?)',
+            (user_id, alarm_time.strftime("%H:%M"), message, datetime.now().isoformat(), None)
         )
         conn.commit()
         conn.close()
@@ -204,7 +255,7 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = alarm_time.replace(year=now.year, month=now.month, day=now.day)
         
         if target < now:
-            target = target.replace(day=target.day + 1)
+            target = target + timedelta(days=1)
         
         time_until = target - now
         hours = int(time_until.total_seconds() // 3600)
@@ -226,10 +277,11 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ **Будильник установлен!**\n\n"
             f"⏰ **Время:** `{alarm_time.strftime('%H:%M')}`\n"
-            f"⏳ **До будильника:** {time_text.strip() or 'менее минуты'}\n\n"
+            f"⏳ **До будильника:** {time_text.strip() or 'менее минуты'}\n"
+            f"📅 **Тип:** Одноразовый\n\n"
             f"📢 Бот будет отправлять сообщения каждые 2 секунды\n"
             f"❌ Для остановки: напишите 'стоп' или `/stop`\n\n"
-            f"💡 *Или используйте кнопки ниже*",
+            f"💡 Для повторяющегося будильника используйте `/repeat`",
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
@@ -239,6 +291,122 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Неверный формат времени. Используйте: /set HH:MM [сообщение]\n"
             "Пример: /set 08:30"
         )
+
+# Обработчик команды /repeat
+async def set_repeat_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Устанавливает повторяющийся будильник"""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ Неверный формат. Используйте: /repeat HH:MM дни [сообщение]\n\n"
+            "📝 **Формат дней:**\n"
+            "• `1234567` - все дни (1=понедельник, 7=воскресенье)\n"
+            "• `12345` - будни (понедельник-пятница)\n"
+            "• `67` - выходные (суббота-воскресенье)\n"
+            "• `1` - только понедельник\n\n"
+            "**Примеры:**\n"
+            "• `/repeat 08:30 12345 Работа`\n"
+            "• `/repeat 09:00 1234567 Каждый день`\n"
+            "• `/repeat 12:00 67 Выходные`"
+        )
+        return
+    
+    user_id = update.effective_user.id
+    
+    try:
+        # Парсим время
+        time_str = context.args[0]
+        alarm_time = datetime.strptime(time_str, "%H:%M")
+        
+        # Парсим дни недели
+        days_str = context.args[1]
+        # Преобразуем из формата 1-7 в 0-6 (Python weekday)
+        repeat_days_set = set()
+        for day_char in days_str:
+            if day_char.isdigit():
+                day_num = int(day_char)
+                if 1 <= day_num <= 7:
+                    # Конвертируем: 1(Пн)=0, 2(Вт)=1, ..., 7(Вс)=6
+                    repeat_days_set.add(day_num - 1)
+        
+        if not repeat_days_set:
+            raise ValueError("Неверный формат дней недели")
+        
+        # Получаем сообщение, если есть
+        message = " ".join(context.args[2:]) if len(context.args) > 2 else ""
+        
+        # Планируем новый будильник
+        await schedule_alarm(context.application, user_id, alarm_time, message, repeat_days_set)
+        
+        # Сохраняем в БД
+        conn = sqlite3.connect('alarms.db')
+        cursor = conn.cursor()
+        # Удаляем старые повторяющиеся будильники пользователя (с таким же временем)
+        cursor.execute(
+            'DELETE FROM alarms WHERE user_id = ? AND alarm_time = ? AND repeat_days IS NOT NULL AND repeat_days != ""',
+            (user_id, alarm_time.strftime("%H:%M"))
+        )
+        # Добавляем новый
+        cursor.execute(
+            'INSERT INTO alarms (user_id, alarm_time, message, created_at, repeat_days) VALUES (?, ?, ?, ?, ?)',
+            (user_id, alarm_time.strftime("%H:%M"), message, datetime.now().isoformat(), json.dumps(list(repeat_days_set)))
+        )
+        conn.commit()
+        conn.close()
+        
+        # Вычисляем время до будильника
+        now = datetime.now()
+        target = alarm_time.replace(year=now.year, month=now.month, day=now.day)
+        target = find_next_repeat_day(target, repeat_days_set, now)
+        
+        time_until = target - now
+        hours = int(time_until.total_seconds() // 3600)
+        minutes = int((time_until.total_seconds() % 3600) // 60)
+        
+        # Формируем сообщение о времени до будильника
+        time_text = ""
+        if hours > 0:
+            time_text += f"{hours} час(ов) "
+        if minutes > 0:
+            time_text += f"{minutes} минут(ы) "
+        
+        days_text = format_days(json.dumps(list(repeat_days_set)))
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 Мои будильники", callback_data="status")],
+            [InlineKeyboardButton("🛑 Остановить", callback_data="stop")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"✅ **Повторяющийся будильник установлен!**\n\n"
+            f"⏰ **Время:** `{alarm_time.strftime('%H:%M')}`\n"
+            f"📅 **Повтор:** {days_text}\n"
+            f"⏳ **Следующий раз:** {time_text.strip() or 'менее минуты'}\n\n"
+            f"📢 Бот будет отправлять сообщения каждые 2 секунды\n"
+            f"❌ Для остановки: напишите 'стоп' или `/stop`",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+        
+    except ValueError as e:
+        error_msg = str(e)
+        if "time" in error_msg.lower() or "формат" in error_msg.lower():
+            await update.message.reply_text(
+                "❌ Неверный формат времени. Используйте: /repeat HH:MM дни [сообщение]\n"
+                "Пример: /repeat 08:30 12345 Работа"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Неверный формат дней. Используйте числа от 1 до 7:\n"
+                "• 1 = Понедельник\n"
+                "• 2 = Вторник\n"
+                "• 3 = Среда\n"
+                "• 4 = Четверг\n"
+                "• 5 = Пятница\n"
+                "• 6 = Суббота\n"
+                "• 7 = Воскресенье\n\n"
+                "Пример: `/repeat 08:30 12345` - будни"
+            )
 
 # Обработчик команды /stop
 async def stop_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,6 +446,20 @@ async def stop_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+# Функция форматирования дней недели
+def format_days(repeat_days: Optional[str]) -> str:
+    """Форматирует дни недели для отображения"""
+    if not repeat_days:
+        return "Одноразовый"
+    
+    try:
+        days_set = set(json.loads(repeat_days))
+        day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        selected_days = [day_names[i] for i in sorted(days_set)]
+        return ", ".join(selected_days)
+    except:
+        return "Одноразовый"
+
 # Обработчик команды /status
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает статус будильников"""
@@ -286,7 +468,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем БД
     conn = sqlite3.connect('alarms.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT alarm_time, message FROM alarms WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT alarm_time, message, repeat_days FROM alarms WHERE user_id = ?', (user_id,))
     alarms = cursor.fetchall()
     conn.close()
     
@@ -295,11 +477,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     status_text = "📊 Ваши активные будильники:\n\n"
-    for alarm_time, message in alarms:
+    for alarm_time, message, repeat_days in alarms:
         status_text += f"⏰ {alarm_time}"
         if message:
             status_text += f" — {message}"
-        status_text += "\n"
+        status_text += f"\n📅 {format_days(repeat_days)}\n\n"
     
     await update.message.reply_text(status_text)
 
@@ -335,23 +517,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Проверяем БД
         conn = sqlite3.connect('alarms.db')
         cursor = conn.cursor()
-        cursor.execute('SELECT alarm_time, message FROM alarms WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT alarm_time, message, repeat_days FROM alarms WHERE user_id = ?', (user_id,))
         alarms = cursor.fetchall()
         conn.close()
         
         if not alarms:
             await query.edit_message_text(
                 "📭 **Нет активных будильников**\n\n"
-                "Используйте `/set HH:MM` для установки будильника",
+                "Используйте `/set HH:MM` для одноразового будильника\n"
+                "Или `/repeat HH:MM дни` для повторяющегося",
                 parse_mode="Markdown"
             )
         else:
             status_text = "📊 **Ваши активные будильники:**\n\n"
-            for alarm_time, message in alarms:
+            for alarm_time, message, repeat_days in alarms:
                 status_text += f"⏰ `{alarm_time}`"
                 if message:
                     status_text += f" — *{message}*"
-                status_text += "\n"
+                status_text += f"\n📅 *{format_days(repeat_days)}*\n\n"
             
             await query.edit_message_text(
                 status_text,
@@ -411,6 +594,7 @@ def main():
     # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set", set_alarm))
+    application.add_handler(CommandHandler("repeat", set_repeat_alarm))
     application.add_handler(CommandHandler("stop", stop_alarm))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
