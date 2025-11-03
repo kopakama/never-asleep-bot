@@ -494,14 +494,27 @@ async def stop_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for task in active_alarms[user_id]:
         task.cancel()
     
-    # Удаляем из БД
+    # Получаем повторяющиеся будильники из БД перед удалением
     conn = sqlite3.connect('alarms.db')
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM alarms WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT alarm_time, message, repeat_days FROM alarms WHERE user_id = ? AND repeat_days IS NOT NULL AND repeat_days != ""', (user_id,))
+    recurring_alarms = cursor.fetchall()
+    
+    # Удаляем из БД только одноразовые будильники
+    cursor.execute('DELETE FROM alarms WHERE user_id = ? AND (repeat_days IS NULL OR repeat_days = "")', (user_id,))
     conn.commit()
     conn.close()
     
     active_alarms[user_id] = []
+    
+    # Перепланируем повторяющиеся будильники
+    for alarm_time, message, repeat_days in recurring_alarms:
+        try:
+            alarm_datetime = datetime.strptime(alarm_time, "%H:%M")
+            repeat_days_set = set(json.loads(repeat_days)) if repeat_days else None
+            await schedule_alarm(context.application, user_id, alarm_datetime, message or "", repeat_days_set)
+        except Exception as e:
+            logger.error(f"Ошибка при перепланировании повторяющегося будильника: {e}")
     
     keyboard = [
         [InlineKeyboardButton("⏰ Установить новый", callback_data="set_alarm")],
@@ -509,12 +522,21 @@ async def stop_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        "🛑 **Все будильники остановлены!**\n\n"
-        "Для установки нового будильника используйте `/set HH:MM`",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+    if recurring_alarms:
+        await update.message.reply_text(
+            "🛑 **Одноразовые будильники остановлены!**\n\n"
+            "🔄 **Повторяющиеся будильники сохранены и продолжат работу.**\n\n"
+            "Для установки нового будильника используйте `/set HH:MM`",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "🛑 **Все будильники остановлены!**\n\n"
+            "Для установки нового будильника используйте `/set HH:MM`",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
 
 # Функция форматирования дней недели
 def format_days(repeat_days: Optional[str]) -> str:
@@ -628,20 +650,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for task in active_alarms[user_id]:
             task.cancel()
         
-        # Удаляем из БД
+        # Получаем повторяющиеся будильники из БД перед удалением
         conn = sqlite3.connect('alarms.db')
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM alarms WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT alarm_time, message, repeat_days FROM alarms WHERE user_id = ? AND repeat_days IS NOT NULL AND repeat_days != ""', (user_id,))
+        recurring_alarms = cursor.fetchall()
+        
+        # Удаляем из БД только одноразовые будильники
+        cursor.execute('DELETE FROM alarms WHERE user_id = ? AND (repeat_days IS NULL OR repeat_days = "")', (user_id,))
         conn.commit()
         conn.close()
         
         active_alarms[user_id] = []
         
-        await query.edit_message_text(
-            "🛑 **Все будильники остановлены!**\n\n"
-            "Для установки нового будильника отправьте `/set HH:MM`",
-            parse_mode="Markdown"
-        )
+        # Перепланируем повторяющиеся будильники
+        for alarm_time, message, repeat_days in recurring_alarms:
+            try:
+                alarm_datetime = datetime.strptime(alarm_time, "%H:%M")
+                repeat_days_set = set(json.loads(repeat_days)) if repeat_days else None
+                await schedule_alarm(context.application, user_id, alarm_datetime, message or "", repeat_days_set)
+            except Exception as e:
+                logger.error(f"Ошибка при перепланировании повторяющегося будильника: {e}")
+        
+        if recurring_alarms:
+            await query.edit_message_text(
+                "🛑 **Одноразовые будильники остановлены!**\n\n"
+                "🔄 **Повторяющиеся будильники сохранены и продолжат работу.**\n\n"
+                "Для установки нового будильника отправьте `/set HH:MM`",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text(
+                "🛑 **Все будильники остановлены!**\n\n"
+                "Для установки нового будильника отправьте `/set HH:MM`",
+                parse_mode="Markdown"
+            )
 
 def main():
     """Основная функция запуска бота"""
