@@ -1,0 +1,59 @@
+[33mcommit 038cc2b8d1e8d48c189da1214484a89883024192[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Mon Nov 3 09:00:54 2025 +0300
+
+    РЎРѕС…СЂР°РЅСЏС‚СЊ РїРѕРІС‚РѕСЂСЏСЋС‰РёРµСЃСЏ Р±СѓРґРёР»СЊРЅРёРєРё РїСЂРё РѕСЃС‚Р°РЅРѕРІРєРµ
+
+[33mcommit b50678892ead2e9fbdfbae4840ec94a32d85e12d[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Sat Nov 1 23:28:02 2025 +0300
+
+    исправлен формат времени
+
+[33mcommit 3a12a0efe16ff732b6611b4c0b92088cf277c541[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Sat Nov 1 23:25:52 2025 +0300
+
+    добавлен будильник с повторением
+
+[33mcommit 14f5cfe780c8a4e1924f4f0dfda1498fca78c17f[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Sun Oct 26 13:40:55 2025 +0300
+
+    Update text to 2 seconds
+
+[33mcommit fbee73febb562e24de157eddc9f511c0b9435c43[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Sun Oct 26 13:40:41 2025 +0300
+
+    Change spam interval to 2 seconds
+
+[33mcommit 2fba24f3d16cfbd413071473005aa02efc7c2094[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Sun Oct 26 13:34:36 2025 +0300
+
+    Add deployment instructions
+
+[33mcommit af0639cc04db1a34e2cfaaf9365c8daccb6271a8[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Sun Oct 26 13:33:44 2025 +0300
+
+    Fix update script path
+
+[33mcommit 02e877e3d4e81afd0de6fe08f5b4e02d5f689ed8[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Sun Oct 26 13:30:33 2025 +0300
+
+    Add update script
+
+[33mcommit 48792d0b3ca6348f7e19683ba66d21c7bfda9f3a[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Sun Oct 26 13:28:37 2025 +0300
+
+    Add inline buttons and spam mode
+
+[33mcommit 73bbca918db98a587126c1a2e957e42d63633e22[m
+Author: Artem Simakov <Artem.Simakov@enterra-inc.com>
+Date:   Sun Oct 26 12:59:24 2025 +0300
+
+    initial
