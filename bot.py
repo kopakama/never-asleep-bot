@@ -5,6 +5,7 @@ import sqlite3
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
+from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from dotenv import load_dotenv
@@ -25,6 +26,40 @@ active_alarms: Dict[int, List[asyncio.Task]] = {}
 # Словарь для флагов спама {user_id: True/False}
 spam_active: Dict[int, bool] = {}
 
+# Функции для работы с часовыми поясами
+def get_user_timezone(user_id: int) -> str:
+    """Получает часовой пояс пользователя из БД, по умолчанию UTC"""
+    conn = sqlite3.connect('alarms.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT timezone FROM user_timezones WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else 'UTC'
+
+def set_user_timezone(user_id: int, timezone: str) -> bool:
+    """Устанавливает часовой пояс пользователя"""
+    try:
+        # Проверяем, что часовой пояс валидный
+        ZoneInfo(timezone)
+        conn = sqlite3.connect('alarms.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO user_timezones (user_id, timezone)
+            VALUES (?, ?)
+        ''', (user_id, timezone))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при установке часового пояса: {e}")
+        return False
+
+def get_user_datetime_now(user_id: int) -> datetime:
+    """Получает текущее время в часовом поясе пользователя"""
+    timezone_str = get_user_timezone(user_id)
+    tz = ZoneInfo(timezone_str)
+    return datetime.now(tz)
+
 # Инициализация БД
 def init_db():
     conn = sqlite3.connect('alarms.db')
@@ -44,6 +79,14 @@ def init_db():
         cursor.execute('ALTER TABLE alarms ADD COLUMN repeat_days TEXT')
     except sqlite3.OperationalError:
         pass  # Колонка уже существует
+    
+    # Создаем таблицу для часовых поясов пользователей
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_timezones (
+            user_id INTEGER PRIMARY KEY,
+            timezone TEXT NOT NULL DEFAULT 'UTC'
+        )
+    ''')
     conn.commit()
     conn.close()
     logger.info("База данных инициализирована")
@@ -75,8 +118,9 @@ async def schedule_alarm(app: Application, user_id: int, alarm_time: datetime, m
         message: Сообщение для будильника
         repeat_days: Множество дней недели (0=понедельник, 6=воскресенье) для повторяющихся будильников
     """
-    now = datetime.now()
-    # Создаем datetime с текущей датой и указанным временем из alarm_time
+    # Получаем текущее время в часовом поясе пользователя
+    now = get_user_datetime_now(user_id)
+    # Создаем datetime с текущей датой и указанным временем из alarm_time в часовом поясе пользователя
     target = now.replace(hour=alarm_time.hour, minute=alarm_time.minute, second=0, microsecond=0)
     
     # Если время прошло и это не повторяющийся будильник
@@ -92,8 +136,12 @@ async def schedule_alarm(app: Application, user_id: int, alarm_time: datetime, m
     if repeat_days and target.weekday() not in repeat_days:
         target = find_next_repeat_day(target, repeat_days, now)
     
-    delay = (target - now).total_seconds()
-    logger.info(f"Будильник запланирован для пользователя {user_id} на {target.strftime('%Y-%m-%d %H:%M')} (повтор: {repeat_days is not None})")
+    # Вычисляем задержку в секундах (конвертируем в UTC для расчета)
+    now_utc = datetime.now(ZoneInfo('UTC'))
+    target_utc = target.astimezone(ZoneInfo('UTC'))
+    delay = (target_utc - now_utc).total_seconds()
+    
+    logger.info(f"Будильник запланирован для пользователя {user_id} на {target.strftime('%Y-%m-%d %H:%M %Z')} (повтор: {repeat_days is not None})")
     
     # Создаем задачу
     task = asyncio.create_task(
@@ -128,7 +176,8 @@ async def spam_messages(app: Application, user_id: int, alarm_time: datetime, me
     
     while spam_active.get(user_id, False):
         try:
-            current_time = datetime.now().strftime("%H:%M:%S")
+            # Получаем текущее время в часовом поясе пользователя
+            current_time = get_user_datetime_now(user_id).strftime("%H:%M:%S")
             alarm_text = f"⏰ БУДИЛЬНИК! Время: {alarm_time.strftime('%H:%M')}\n🕐 Сейчас: {current_time}"
             if message:
                 alarm_text += f"\n💬 {message}"
@@ -180,6 +229,10 @@ async def send_alarm(app: Application, user_id: int, alarm_time: datetime, messa
 # Обработчик команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Приветственное сообщение"""
+    user_id = update.effective_user.id
+    timezone = get_user_timezone(user_id)
+    current_time = get_user_datetime_now(user_id).strftime("%H:%M:%S")
+    
     keyboard = [
         [InlineKeyboardButton("⏰ Установить будильник", callback_data="set_alarm")],
         [InlineKeyboardButton("📊 Мои будильники", callback_data="status")],
@@ -189,17 +242,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "👋 Привет! Я **Будильник** 📢\n\n"
+        f"🌍 **Ваш часовой пояс:** `{timezone}`\n"
+        f"🕐 **Текущее время:** `{current_time}`\n\n"
         "🎯 **Как это работает:**\n"
         "1. Установите время будильника\n"
         "2. Бот будет звонить каждые 2 секунды\n"
         "3. Напишите 'стоп' чтобы остановить\n\n"
         "📌 **Команды:**\n"
         "• `/set HH:MM [сообщение]` - одноразовый будильник\n"
-        "• `/repeat HH:MM дни [сообщение]` - повторяющийся\n\n"
+        "• `/repeat HH:MM дни [сообщение]` - повторяющийся\n"
+        "• `/timezone` - установить часовой пояс\n\n"
         "📌 **Примеры:**\n"
         "• `/set 08:30 Доброе утро!`\n"
         "• `/repeat 09:00 12345 Работа` - будни\n"
-        "• `/repeat 12:00 67 Выходные`\n\n"
+        "• `/repeat 12:00 67 Выходные`\n"
+        "• `/timezone Europe/Moscow`\n\n"
         "Или используйте кнопки ниже 👇",
         reply_markup=reply_markup,
         parse_mode="Markdown"
@@ -209,10 +266,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Устанавливает одноразовый будильник"""
     if not context.args:
+        user_id = update.effective_user.id
+        timezone = get_user_timezone(user_id)
+        current_time = get_user_datetime_now(user_id).strftime("%H:%M")
+        
+        keyboard = [
+            [InlineKeyboardButton("📝 Примеры", callback_data="set_examples")],
+            [InlineKeyboardButton("🔄 Повторяющийся", callback_data="repeat_help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
-            "❌ Неверный формат. Используйте: /set HH:MM [сообщение]\n"
-            "Пример: /set 08:30 Проснись!\n\n"
-            "💡 Для повторяющегося будильника используйте `/repeat`"
+            "⏰ **Установка одноразового будильника**\n\n"
+            f"🌍 **Ваш часовой пояс:** `{timezone}`\n"
+            f"🕐 **Текущее время:** `{current_time}`\n\n"
+            "📝 **Формат команды:**\n"
+            "`/set HH:MM [сообщение]`\n\n"
+            "**Примеры:**\n"
+            "• `/set 08:30` - будильник на 8:30\n"
+            "• `/set 08:30 Доброе утро!` - с сообщением\n"
+            "• `/set 14:00 Обед`\n"
+            "• `/set 22:00 Время спать`\n\n"
+            "💡 **Подсказка:** Время указывается в вашем часовом поясе",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
         return
     
@@ -257,15 +334,16 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Удаляем старые будильники пользователя (только одноразовые)
         cursor.execute('DELETE FROM alarms WHERE user_id = ? AND (repeat_days IS NULL OR repeat_days = "")', (user_id,))
         # Добавляем новый
+        now_user = get_user_datetime_now(user_id)
         cursor.execute(
             'INSERT INTO alarms (user_id, alarm_time, message, created_at, repeat_days) VALUES (?, ?, ?, ?, ?)',
-            (user_id, alarm_time.strftime("%H:%M"), message, datetime.now().isoformat(), None)
+            (user_id, alarm_time.strftime("%H:%M"), message, now_user.isoformat(), None)
         )
         conn.commit()
         conn.close()
         
-        # Вычисляем время до будильника
-        now = datetime.now()
+        # Вычисляем время до будильника в часовом поясе пользователя
+        now = get_user_datetime_now(user_id)
         # Создаем datetime с текущей датой и указанным временем
         target = now.replace(hour=alarm_time.hour, minute=alarm_time.minute, second=0, microsecond=0)
         
@@ -331,17 +409,38 @@ async def set_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_repeat_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Устанавливает повторяющийся будильник"""
     if not context.args or len(context.args) < 2:
+        user_id = update.effective_user.id
+        timezone = get_user_timezone(user_id)
+        current_time = get_user_datetime_now(user_id).strftime("%H:%M")
+        
+        keyboard = [
+            [InlineKeyboardButton("📝 Примеры", callback_data="repeat_examples")],
+            [InlineKeyboardButton("⏰ Одноразовый", callback_data="set_help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
-            "❌ Неверный формат. Используйте: /repeat HH:MM дни [сообщение]\n\n"
-            "📝 **Формат дней:**\n"
-            "• `1234567` - все дни (1=понедельник, 7=воскресенье)\n"
-            "• `12345` - будни (понедельник-пятница)\n"
-            "• `67` - выходные (суббота-воскресенье)\n"
-            "• `1` - только понедельник\n\n"
+            "🔄 **Установка повторяющегося будильника**\n\n"
+            f"🌍 **Ваш часовой пояс:** `{timezone}`\n"
+            f"🕐 **Текущее время:** `{current_time}`\n\n"
+            "📝 **Формат команды:**\n"
+            "`/repeat HH:MM дни [сообщение]`\n\n"
+            "📅 **Формат дней (1-7):**\n"
+            "• `1` = Понедельник\n"
+            "• `2` = Вторник\n"
+            "• `3` = Среда\n"
+            "• `4` = Четверг\n"
+            "• `5` = Пятница\n"
+            "• `6` = Суббота\n"
+            "• `7` = Воскресенье\n\n"
             "**Примеры:**\n"
-            "• `/repeat 08:30 12345 Работа`\n"
-            "• `/repeat 09:00 1234567 Каждый день`\n"
-            "• `/repeat 12:00 67 Выходные`"
+            "• `/repeat 08:30 12345` - будни (Пн-Пт)\n"
+            "• `/repeat 09:00 1234567` - каждый день\n"
+            "• `/repeat 12:00 67` - выходные (Сб-Вс)\n"
+            "• `/repeat 08:00 12345 Работа` - будни с сообщением\n\n"
+            "💡 **Подсказка:** Время указывается в вашем часовом поясе",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
         return
     
@@ -394,15 +493,16 @@ async def set_repeat_alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (user_id, alarm_time.strftime("%H:%M"))
         )
         # Добавляем новый
+        now_user = get_user_datetime_now(user_id)
         cursor.execute(
             'INSERT INTO alarms (user_id, alarm_time, message, created_at, repeat_days) VALUES (?, ?, ?, ?, ?)',
-            (user_id, alarm_time.strftime("%H:%M"), message, datetime.now().isoformat(), json.dumps(list(repeat_days_set)))
+            (user_id, alarm_time.strftime("%H:%M"), message, now_user.isoformat(), json.dumps(list(repeat_days_set)))
         )
         conn.commit()
         conn.close()
         
-        # Вычисляем время до будильника
-        now = datetime.now()
+        # Вычисляем время до будильника в часовом поясе пользователя
+        now = get_user_datetime_now(user_id)
         # Создаем datetime с текущей датой и указанным временем
         target = now.replace(hour=alarm_time.hour, minute=alarm_time.minute, second=0, microsecond=0)
         target = find_next_repeat_day(target, repeat_days_set, now)
@@ -568,14 +668,74 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 У вас нет установленных будильников.")
         return
     
-    status_text = "📊 Ваши активные будильники:\n\n"
-    for alarm_time, message, repeat_days in alarms:
-        status_text += f"⏰ {alarm_time}"
-        if message:
-            status_text += f" — {message}"
-        status_text += f"\n📅 {format_days(repeat_days)}\n\n"
+    timezone = get_user_timezone(user_id)
+    current_time = get_user_datetime_now(user_id).strftime("%H:%M:%S")
     
-    await update.message.reply_text(status_text)
+    status_text = f"📊 **Ваши активные будильники:**\n\n"
+    status_text += f"🌍 **Часовой пояс:** `{timezone}`\n"
+    status_text += f"🕐 **Текущее время:** `{current_time}`\n\n"
+    
+    for alarm_time, message, repeat_days in alarms:
+        status_text += f"⏰ `{alarm_time}`"
+        if message:
+            status_text += f" — *{message}*"
+        status_text += f"\n📅 *{format_days(repeat_days)}*\n\n"
+    
+    await update.message.reply_text(status_text, parse_mode="Markdown")
+
+# Обработчик команды /timezone
+async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Устанавливает часовой пояс пользователя"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        current_tz = get_user_timezone(user_id)
+        current_time = get_user_datetime_now(user_id).strftime("%H:%M:%S")
+        
+        await update.message.reply_text(
+            f"🌍 **Текущий часовой пояс:** `{current_tz}`\n"
+            f"🕐 **Текущее время:** `{current_time}`\n\n"
+            "📝 **Установить часовой пояс:**\n"
+            "`/timezone <название>`\n\n"
+            "**Примеры:**\n"
+            "• `/timezone Europe/Moscow` - Москва\n"
+            "• `/timezone Europe/Kiev` - Киев\n"
+            "• `/timezone Asia/Tashkent` - Ташкент\n"
+            "• `/timezone America/New_York` - Нью-Йорк\n"
+            "• `/timezone Asia/Tokyo` - Токио\n"
+            "• `/timezone UTC` - UTC\n\n"
+            "💡 Используйте формат IANA Time Zone Database\n"
+            "Список: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+            parse_mode="Markdown"
+        )
+        return
+    
+    timezone_str = context.args[0].strip()
+    
+    # Проверяем валидность часового пояса
+    if set_user_timezone(user_id, timezone_str):
+        current_time = get_user_datetime_now(user_id).strftime("%H:%M:%S")
+        await update.message.reply_text(
+            f"✅ **Часовой пояс установлен!**\n\n"
+            f"🌍 **Часовой пояс:** `{timezone_str}`\n"
+            f"🕐 **Текущее время:** `{current_time}`\n\n"
+            "Теперь все будильники будут работать в вашем часовом поясе!",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ **Неверный часовой пояс!**\n\n"
+            "Используйте формат IANA Time Zone Database.\n\n"
+            "**Примеры:**\n"
+            "• `Europe/Moscow`\n"
+            "• `Europe/Kiev`\n"
+            "• `Asia/Tashkent`\n"
+            "• `America/New_York`\n"
+            "• `UTC`\n\n"
+            "Список всех часовых поясов:\n"
+            "https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+            parse_mode="Markdown"
+        )
 
 # Обработчик текстовых сообщений (для команды "стоп")
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -592,15 +752,135 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if query.data == "set_alarm":
+        user_id = update.effective_user.id
+        timezone = get_user_timezone(user_id)
+        current_time = get_user_datetime_now(user_id).strftime("%H:%M")
+        
+        keyboard = [
+            [InlineKeyboardButton("📝 Примеры", callback_data="set_examples")],
+            [InlineKeyboardButton("🔄 Повторяющийся", callback_data="repeat_help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await query.edit_message_text(
-            "⏰ **Установить будильник**\n\n"
-            "📝 **Формат:**\n"
+            "⏰ **Установка одноразового будильника**\n\n"
+            f"🌍 **Ваш часовой пояс:** `{timezone}`\n"
+            f"🕐 **Текущее время:** `{current_time}`\n\n"
+            "📝 **Формат команды:**\n"
             "`/set HH:MM [сообщение]`\n\n"
             "**Примеры:**\n"
-            "• `/set 08:30 Доброе утро!`\n"
-            "• `/set 14:00 Обеденный перерыв`\n"
+            "• `/set 08:30` - будильник на 8:30\n"
+            "• `/set 08:30 Доброе утро!` - с сообщением\n"
+            "• `/set 14:00 Обед`\n"
             "• `/set 22:00 Время спать`\n\n"
-            "💡 После установки бот будет звонить каждые 2 секунды",
+            "💡 **Подсказка:** Время указывается в вашем часовом поясе",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    elif query.data == "set_examples":
+        keyboard = [
+            [InlineKeyboardButton("🔄 Повторяющийся", callback_data="repeat_help")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="set_alarm")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📝 **Примеры одноразовых будильников:**\n\n"
+            "• `/set 08:30`\n"
+            "  → Будильник на 8:30 утра\n\n"
+            "• `/set 08:30 Доброе утро!`\n"
+            "  → Будильник на 8:30 с сообщением\n\n"
+            "• `/set 14:00 Обед`\n"
+            "  → Будильник на 14:00 с напоминанием об обеде\n\n"
+            "• `/set 22:00 Время спать`\n"
+            "  → Будильник на 22:00 с напоминанием\n\n"
+            "💡 **Формат:** `/set HH:MM [сообщение]`\n"
+            "Время указывается в вашем часовом поясе",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    elif query.data == "set_help":
+        user_id = update.effective_user.id
+        timezone = get_user_timezone(user_id)
+        current_time = get_user_datetime_now(user_id).strftime("%H:%M")
+        
+        keyboard = [
+            [InlineKeyboardButton("📝 Примеры", callback_data="set_examples")],
+            [InlineKeyboardButton("🔄 Повторяющийся", callback_data="repeat_help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "⏰ **Установка одноразового будильника**\n\n"
+            f"🌍 **Ваш часовой пояс:** `{timezone}`\n"
+            f"🕐 **Текущее время:** `{current_time}`\n\n"
+            "📝 **Формат команды:**\n"
+            "`/set HH:MM [сообщение]`\n\n"
+            "**Примеры:**\n"
+            "• `/set 08:30` - будильник на 8:30\n"
+            "• `/set 08:30 Доброе утро!` - с сообщением\n"
+            "• `/set 14:00 Обед`\n"
+            "• `/set 22:00 Время спать`\n\n"
+            "💡 **Подсказка:** Время указывается в вашем часовом поясе",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    elif query.data == "repeat_help":
+        user_id = update.effective_user.id
+        timezone = get_user_timezone(user_id)
+        current_time = get_user_datetime_now(user_id).strftime("%H:%M")
+        
+        keyboard = [
+            [InlineKeyboardButton("📝 Примеры", callback_data="repeat_examples")],
+            [InlineKeyboardButton("⏰ Одноразовый", callback_data="set_help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🔄 **Установка повторяющегося будильника**\n\n"
+            f"🌍 **Ваш часовой пояс:** `{timezone}`\n"
+            f"🕐 **Текущее время:** `{current_time}`\n\n"
+            "📝 **Формат команды:**\n"
+            "`/repeat HH:MM дни [сообщение]`\n\n"
+            "📅 **Формат дней (1-7):**\n"
+            "• `1` = Понедельник\n"
+            "• `2` = Вторник\n"
+            "• `3` = Среда\n"
+            "• `4` = Четверг\n"
+            "• `5` = Пятница\n"
+            "• `6` = Суббота\n"
+            "• `7` = Воскресенье\n\n"
+            "**Примеры:**\n"
+            "• `/repeat 08:30 12345` - будни (Пн-Пт)\n"
+            "• `/repeat 09:00 1234567` - каждый день\n"
+            "• `/repeat 12:00 67` - выходные (Сб-Вс)\n"
+            "• `/repeat 08:00 12345 Работа` - будни с сообщением\n\n"
+            "💡 **Подсказка:** Время указывается в вашем часовом поясе",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    elif query.data == "repeat_examples":
+        keyboard = [
+            [InlineKeyboardButton("⏰ Одноразовый", callback_data="set_help")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="repeat_help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📝 **Примеры повторяющихся будильников:**\n\n"
+            "• `/repeat 08:30 12345`\n"
+            "  → Будни (Пн-Пт) в 8:30\n\n"
+            "• `/repeat 09:00 1234567`\n"
+            "  → Каждый день в 9:00\n\n"
+            "• `/repeat 12:00 67`\n"
+            "  → Выходные (Сб-Вс) в 12:00\n\n"
+            "• `/repeat 08:00 12345 Работа`\n"
+            "  → Будни в 8:00 с сообщением\n\n"
+            "• `/repeat 22:00 67 Отдых`\n"
+            "  → Выходные в 22:00 с сообщением\n\n"
+            "💡 **Формат:** `/repeat HH:MM дни [сообщение]`\n"
+            "Время указывается в вашем часовом поясе",
+            reply_markup=reply_markup,
             parse_mode="Markdown"
         )
     elif query.data == "status":
@@ -621,7 +901,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         else:
+            timezone = get_user_timezone(user_id)
+            current_time = get_user_datetime_now(user_id).strftime("%H:%M:%S")
+            
             status_text = "📊 **Ваши активные будильники:**\n\n"
+            status_text += f"🌍 **Часовой пояс:** `{timezone}`\n"
+            status_text += f"🕐 **Текущее время:** `{current_time}`\n\n"
+            
             for alarm_time, message, repeat_days in alarms:
                 status_text += f"⏰ `{alarm_time}`"
                 if message:
@@ -710,6 +996,7 @@ def main():
     application.add_handler(CommandHandler("repeat", set_repeat_alarm))
     application.add_handler(CommandHandler("stop", stop_alarm))
     application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("timezone", set_timezone))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     # Обработчик для inline-кнопок
